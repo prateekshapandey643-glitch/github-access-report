@@ -27,8 +27,8 @@ A service that connects to GitHub, inventories a GitHub organization's repositor
 Requirements: JDK 17+, Maven 3.9+.
 
 ```bash
-git clone <this-repo-url>
-cd github-access-report-java
+git clone https://github.com/prateekshapandey643-glitch/github-access-report.git
+cd github-access-report
 cp .env.example .env
 # edit .env — at minimum set GITHUB_TOKEN (see Authentication section), then:
 export $(grep -v '^#' .env | xargs)
@@ -101,7 +101,8 @@ Example response (truncated):
   "generatedAt": "2026-08-23T10:15:00Z",
   "summary": {
     "repositoryCount": 128,
-    "userCount": 1043
+    "userCount": 1043,
+    "unverifiedRepositoryCount": 0
   },
   "users": [
     {
@@ -114,13 +115,15 @@ Example response (truncated):
         { "repository": "public-docs", "permission": "read", "affiliation": "direct" }
       ]
     }
-  ]
+  ],
+  "unverifiedRepositories": []
 }
 ```
 
 Field notes:
 - `permission` is GitHub's standard access level: `admin`, `maintain`, `write`, `triage`, or `read`.
 - `affiliation` is `direct` (explicitly added to that repo, including outside collaborators) or `team_or_org` (access inherited via a team or an organization-wide default permission).
+- `unverifiedRepositoryCount` / `unverifiedRepositories` — repos where collaborator access could **not** be checked (e.g. the token lacks sufficient permission on that specific repo — GitHub requires push access just to list a repo's collaborators). These are excluded from `userCount`/`users`, so a low `userCount` alongside a nonzero `unverifiedRepositoryCount` means "access unknown for those repos," not "nobody has access."
 
 ### `GET /api/health`
 
@@ -135,7 +138,7 @@ Designed against the stated target of 100+ repositories and 1000+ users with acc
 - **Rate-limit-aware retries.** `RetryExecutor` inspects `x-ratelimit-remaining` / `x-ratelimit-reset` and `Retry-After` response headers to back off exactly as long as GitHub asks (both primary and secondary/abuse rate limits), instead of guessing or hammering the API.
 - **Per-organization response cache.** Building a report costs `O(repos)` API calls; a short TTL cache (`report.cache-ttl-ms`, default 5 minutes, `TtlCache`) avoids repeating that work for back-to-back requests. Pass `?refresh=true` for up-to-the-second data.
 - **Linear aggregation.** The repo → user pivot (`AccessReportService.aggregateByUser`) does a single pass with a `HashMap` keyed by login, so aggregating 1000+ users across 100+ repos is linear in the number of (user, repo) access pairs, not quadratic.
-- **Partial-failure resilience.** If one repo's collaborator fetch fails after retries, `GitHubDataService.fetchRepoAccessSafely` reports that repo with an empty collaborator list and logs a warning rather than failing the entire report — a single flaky repo among hundreds shouldn't block visibility into the rest.
+- **Partial-failure resilience, without hiding what failed.** If one repo's collaborator fetch fails after retries, `GitHubDataService.fetchRepoAccessSafely` marks that repo as unverified (rather than silently reporting an empty collaborator list) and logs a warning, so a single flaky or inaccessible repo among hundreds doesn't block visibility into the rest — and doesn't get misread as "verified zero access" either.
 
 ## Error handling
 
@@ -143,11 +146,13 @@ Designed against the stated target of 100+ repositories and 1000+ users with acc
 - All outbound GitHub calls go through `RetryExecutor`, which retries transient (5xx / network) and rate-limit errors, and re-throws anything else (bad credentials, 404s) immediately.
 - `GitHubApiException` carries the HTTP status and response headers needed to make that retry decision.
 - `ApiExceptionHandler` (`@RestControllerAdvice`) centrally maps failures to HTTP responses: `404` for an unknown org, `502` for auth failures or GitHub outages/rate-limit exhaustion, `400` for a malformed org name, `500` as a generic fallback — so controller code stays a simple one-liner.
+- **Per-repo access failures are surfaced, not swallowed.** A `403`/`404` when listing a repo's collaborators (typically: the token lacks push access to that repo) is caught, logged with the reason, and recorded on that repo as `accessError` rather than being treated as "this repo has zero collaborators." The aggregation step then reports it under `unverifiedRepositoryCount`/`unverifiedRepositories` in the API response — so a caller can tell "verified: nobody has access" apart from "we don't know."
 
 ## Assumptions & design decisions
 
 - **"Access" = repository collaborators, including inherited access.** The report includes anyone who can access a repo whether added directly, as an outside collaborator, or via team/organization-wide permissions — from `GET /repos/{owner}/{repo}/collaborators?affiliation=all`. It doesn't separately enumerate *which team* granted access; `affiliation: "team_or_org"` signals "not a direct grant" without naming the team. Extending to per-team breakdowns would mean also calling the Teams API, and is a natural next step rather than something implemented here, to keep request volume proportional to repos rather than repos × teams.
 - **Archived repositories are included** (flagged via `archived: true`) since access still exists even if the repo isn't actively developed. Filtering them out is a one-line change in `GitHubApiClient.listOrgRepos`.
+- **"Unverified" is a distinct outcome from "verified, zero access."** GitHub requires push access to a repo just to list its collaborators, so a token that's valid for the org but lacks that specific permission will get `403`s on some repos. Rather than let those look identical to "confirmed, nobody has access" (which a security-focused access report should never conflate), such repos are excluded from the user aggregation and called out separately (see `unverifiedRepositoryCount` above).
 - **The report is user-centric** (`user → repos`) per the "aggregated view mapping users to the repositories they can access" requirement; the intermediate repo-centric data (`RepoAccessEntry`, `repo → collaborators`) is computed first in `GitHubDataService` and is easy to expose as its own endpoint if a repo-centric view is also wanted.
 - **Caching is in-memory and per-process** (`TtlCache`). Fine for a single-instance deployment. If deployed with multiple replicas, swap it for a shared store (Redis, etc.) behind the same `get/put/invalidate` interface without touching calling code.
 - **Auth defaults to a PAT** for simplicity of local setup/evaluation, with GitHub App support included since it's the better fit for a real production deployment (no dependency on one person's token, explicit installation scope, auto-refreshing credentials).
@@ -194,7 +199,3 @@ src/main/java/com/example/githubaccessreport/
     TtlCache.java                      # in-memory TTL cache
 src/test/java/.../AccessReportServiceTest.java
 ```
-
-## A note on this submission
-
-This project was written and manually reviewed for correctness in an environment without access to Maven Central, so it was **not machine-compiled or test-run before submission** here (unlike the reference structure/logic, which was validated in an earlier Node.js/TypeScript version of this same service). Please run `mvn clean verify` after cloning to compile and run the test suite; if anything doesn't build cleanly, it's a good first thing to flag.
