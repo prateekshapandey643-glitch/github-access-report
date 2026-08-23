@@ -1,0 +1,23 @@
+server:
+  port: ${PORT:8080}
+
+logging:
+  level:
+    root: INFO
+    com.example.githubaccessreport: INFO
+
+github:
+  auth-mode: ${GITHUB_AUTH_MODE:token}
+  token: ${GITHUB_TOKEN:}
+  api-base-url: ${GITHUB_API_BASE_URL:https://api.github.com}
+  default-org: ${GITHUB_DEFAULT_ORG:}
+  max-concurrency: ${GITHUB_MAX_CONCURRENCY:10}
+  max-retries: ${GITHUB_MAX_RETRIES:5}
+  retry-base-delay-ms: ${GITHUB_RETRY_BASE_DELAY_MS:1000}
+  app:
+    app-id: ${GITHUB_APP_ID:}
+    private-key-path: ${GITHUB_APP_PRIVATE_KEY_PATH:}
+    installation-id: ${GITHUB_APP_INSTALLATION_ID:}
+
+report:
+  cache-ttl-ms: ${REPORT_CACHE_TTL_MS:300000}
